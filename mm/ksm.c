@@ -13,6 +13,8 @@
  *	Hugh Dickins
  */
 
+#include "asm/string_64.h"
+#include "linux/kernel.h"
 #include <linux/errno.h>
 #include <linux/mm.h>
 #include <linux/fs.h>
@@ -49,6 +51,41 @@
 #define NUMA(x)		(0)
 #define DO_NUMA(x)	do { } while (0)
 #endif
+
+#define BITSPERWORD 32
+#define SHIFT 5
+#define MASK 0x1F
+#define N 1024 * 1024 * 64
+int bitmap1[1 + N / BITSPERWORD] = {0};
+int bitmap2[1 + N / BITSPERWORD] = {0};
+
+// static void clr_bitmap(int i,int a[]) {        a[i>>SHIFT] &= ~(1<<(i & MASK)); }
+static void set_bitmap(int i, int a[]) { a[i >> SHIFT] |= (1 << (i & MASK)); }
+
+static int test_bitmap(int i, int a[]) { return a[i >> SHIFT] & (1 << (i & MASK)); }
+
+static void reset_bitmap(void)
+{
+    memset(bitmap1, 0, (1 + N / BITSPERWORD) * sizeof(int));
+    memset(bitmap2, 0, (1 + N / BITSPERWORD) * sizeof(int));
+}
+
+static int check_and_set_bitmap(int i, int flag){
+    if (!flag){
+        if (test_bitmap(i, bitmap1)){
+            set_bitmap(i, bitmap2);
+            return 1;
+        }else{
+            set_bitmap(i, bitmap1);
+            return 0;
+        }
+    }else{
+        if (test_bitmap(i, bitmap2))
+            return 1;
+        else
+            return 0;
+    }
+}
 
 /**
  * DOC: Overview
@@ -192,8 +229,20 @@ struct stable_node {
  * @head: pointer to stable_node heading this list in the stable tree
  * @hlist: link into hlist of rmap_items hanging off that stable_node
  */
+#define SHORT_WINDOW 3
+#define LONG_WINDOW 10
+unsigned long bins[4] = {0}; // 0–25%, 25–50%, 50–75%, 75–100%
+bool print_base_detail = false;
+bool print_detail = false;
+
 struct rmap_item {
 	struct rmap_item *rmap_list;
+	bool short_hist[SHORT_WINDOW];
+    bool long_hist[LONG_WINDOW];
+    unsigned int age;
+    unsigned int accessed;
+	unsigned int frequency;
+	struct head_item *head_item;
 	union {
 		struct anon_vma *anon_vma;	/* when stable */
 #ifdef CONFIG_NUMA
@@ -241,6 +290,7 @@ static struct ksm_scan ksm_scan = {
 static struct kmem_cache *rmap_item_cache;
 static struct kmem_cache *stable_node_cache;
 static struct kmem_cache *mm_slot_cache;
+static struct kmem_cache *head_item_cache;
 
 /* The number of nodes in the stable tree */
 static unsigned long ksm_pages_shared;
@@ -309,6 +359,10 @@ static int __init ksm_slab_init(void)
 	if (!rmap_item_cache)
 		goto out;
 
+	head_item_cache = KSM_KMEM_CACHE(head_item, 0);
+	if (!head_item_cache)
+		goto out_free0;
+
 	stable_node_cache = KSM_KMEM_CACHE(stable_node, 0);
 	if (!stable_node_cache)
 		goto out_free1;
@@ -323,16 +377,33 @@ out_free2:
 	kmem_cache_destroy(stable_node_cache);
 out_free1:
 	kmem_cache_destroy(rmap_item_cache);
+out_free0:
+	kmem_cache_destroy(head_item_cache);
 out:
 	return -ENOMEM;
 }
 
 static void __init ksm_slab_free(void)
 {
+	kmem_cache_destroy(head_item_cache);
 	kmem_cache_destroy(mm_slot_cache);
 	kmem_cache_destroy(stable_node_cache);
 	kmem_cache_destroy(rmap_item_cache);
 	mm_slot_cache = NULL;
+}
+
+static inline struct head_item *alloc_head_item(void)
+{
+    struct head_item *head_item;
+
+    head_item = kmem_cache_zalloc(head_item_cache, GFP_KERNEL);
+
+    return head_item;
+}
+
+static inline void free_head_item(struct head_item *head_item)
+{
+    kmem_cache_free(head_item_cache, head_item);
 }
 
 static __always_inline bool is_stable_node_chain(struct stable_node *chain)
@@ -825,6 +896,10 @@ static void remove_trailing_rmap_items(struct mm_slot *mm_slot,
 		*rmap_list = rmap_item->rmap_list;
 		remove_rmap_item_from_tree(rmap_item);
 		free_rmap_item(rmap_item);
+		if (rmap_item->head_item){
+            free_head_item(rmap_item->head_item);
+            rmap_item->head_item = NULL;
+        }
 	}
 }
 
@@ -2199,6 +2274,7 @@ static struct rmap_item *get_next_rmap_item(struct mm_slot *mm_slot,
 					    unsigned long addr)
 {
 	struct rmap_item *rmap_item;
+	int i = 0;
 
 	while (*rmap_list) {
 		rmap_item = *rmap_list;
@@ -2209,6 +2285,10 @@ static struct rmap_item *get_next_rmap_item(struct mm_slot *mm_slot,
 		*rmap_list = rmap_item->rmap_list;
 		remove_rmap_item_from_tree(rmap_item);
 		free_rmap_item(rmap_item);
+		if (rmap_item->head_item){
+            free_head_item(rmap_item->head_item);
+            rmap_item->head_item = NULL;
+        }
 	}
 
 	rmap_item = alloc_rmap_item();
@@ -2218,6 +2298,18 @@ static struct rmap_item *get_next_rmap_item(struct mm_slot *mm_slot,
 		rmap_item->address = addr;
 		rmap_item->rmap_list = *rmap_list;
 		*rmap_list = rmap_item;
+
+		//mine add zero here
+		rmap_item->accessed = 0;
+		rmap_item->frequency = 0;
+		rmap_item->age = 0;
+		rmap_item->head_item = NULL;
+		for (i = 0; i < SHORT_WINDOW; i++) {
+			rmap_item->short_hist[i] = 0;
+		}
+		for (i = 0; i < LONG_WINDOW; i++) {
+			rmap_item->long_hist[i] = 0;
+		}
 	}
 	return rmap_item;
 }
@@ -2229,6 +2321,7 @@ static struct rmap_item *scan_get_next_rmap_item(struct page **page)
 	struct vm_area_struct *vma;
 	struct rmap_item *rmap_item;
 	int nid;
+	int i = 0;
 
 	if (list_empty(&ksm_mm_head.mm_list))
 		return NULL;
@@ -2378,7 +2471,92 @@ next_mm:
 		goto next_mm;
 
 	ksm_scan.seqnr++;
+
+	//print frequency bins
+	trace_printk("==================Round=%lu==================\n",
+			ksm_scan.seqnr);
+	for (i = 0; i < 4; i++) {
+		trace_printk("bin[%d]=%lu\n", i, bins[i]);
+		bins[i] = 0;
+	}
+	trace_printk("============================================\n\n");
+
 	return NULL;
+}
+
+static void get_base_frequency(struct rmap_item* rmap_item,struct page* page){
+	struct mem_cgroup *memcg;
+	unsigned long vm_flags;
+	unsigned int accessed=0;
+	unsigned int i, fs = 0, fl = 0;
+    unsigned int len_short = min(ksm_scan.seqnr + 1, (unsigned long)SHORT_WINDOW);
+    unsigned int len_long = min(ksm_scan.seqnr + 1, (unsigned long)LONG_WINDOW);
+
+	//store s&l fac in bitmap
+	memcg=page->mem_cgroup;
+	accessed = page_referenced(page, 0, memcg, &vm_flags);
+	rmap_item->accessed += accessed;
+	rmap_item->short_hist[rmap_item->age % SHORT_WINDOW] = accessed;
+	rmap_item->long_hist[rmap_item->age++ % LONG_WINDOW] = accessed;
+
+	//cal frequency
+	for (i = 0; i < len_short; i++) {
+		fs += rmap_item->short_hist[i];
+	}
+	for (i = 0; i < len_long; i++) {
+		fl += rmap_item->long_hist[i];
+	}
+	rmap_item->frequency = ((fs * 1000 / len_short)
+					+ (fl * 1000 / len_long))/2;
+
+	//store in buttle
+	if (rmap_item->frequency >= 750)
+		bins[3]++;
+	else if (rmap_item->frequency >= 500)
+		bins[2]++;
+	else if (rmap_item->frequency >= 250)
+		bins[1]++;
+	else if (rmap_item->frequency != 0)
+		bins[0]++;
+
+	//print detail
+	if (print_base_detail && rmap_item->frequency != 0) {
+		trace_printk("page=%lu, fac_short[%d,%d,%d]=%d, "
+			"fac_long[%d,%d,%d,%d,%d,%d,%d,%d,%d,%d]=%d, fac=%d, allac=%d\n",
+			rmap_item->address,
+			rmap_item->short_hist[0], rmap_item->short_hist[1], rmap_item->short_hist[2],
+			fs,
+			rmap_item->long_hist[0], rmap_item->long_hist[1], rmap_item->long_hist[2],
+			rmap_item->long_hist[3], rmap_item->long_hist[4], rmap_item->long_hist[5],
+			rmap_item->long_hist[6], rmap_item->long_hist[7], rmap_item->long_hist[8],
+			rmap_item->long_hist[9],
+			fl,
+			rmap_item->frequency,
+			rmap_item->accessed);
+	}
+}
+
+static int get_base_ksm_pages(struct page *head)
+{
+    int i = 0, j = 0, start = page_to_pfn(head);
+    struct page *page = NULL;
+    int ksm = 0;
+	// unsigned long vm_flags;
+    // struct mem_cgroup *memcg;
+    for (i = 0; i < 32; i++){
+        for (j = 0; j < 16; j++){
+            page = pfn_to_page(start + i + 32 * j);
+            // memcg= page->mem_cgroup;
+            // if (page_referenced(page, 0, memcg, &vm_flags))
+            //     hot++;
+            if (PageKsm(page))
+                ksm++;
+        }
+        // if ((hot - ksm) < 3 * (i + 1))
+        //     break;
+    }
+    // printk("<0>""hot:%d ksm:%d\n",hot,ksm);
+    return ksm;
 }
 
 /**
@@ -2395,6 +2573,22 @@ static void ksm_do_scan(unsigned int scan_npages)
 		rmap_item = scan_get_next_rmap_item(&page);
 		if (!rmap_item)
 			return;
+
+		/* here get base page frequency */
+		get_base_frequency(rmap_item, page);
+
+		/* here get base ksm pages*/
+		if (PageHead(page)) {
+			get_base_ksm_pages(page);
+		}
+
+		if (!rmap_item->head_item) {
+			if (PageHead(page)){
+				rmap_item->head_item = alloc_head_item();
+				
+			}
+		}
+
 		cmp_and_merge_page(page, rmap_item);
 		put_page(page);
 	}
@@ -2888,6 +3082,13 @@ static ssize_t run_store(struct kobject *kobj, struct kobj_attribute *attr,
 {
 	int err;
 	unsigned long flags;
+
+	memset(bins, 0, sizeof(long) * 4);
+	if (ksm_thread_pages_to_scan == 10001) {
+		print_detail = 1;
+	}else {
+		print_detail = 0;
+	}
 
 	err = kstrtoul(buf, 10, &flags);
 	if (err || flags > UINT_MAX)

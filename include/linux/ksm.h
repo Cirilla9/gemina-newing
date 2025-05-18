@@ -18,6 +18,16 @@
 struct stable_node;
 struct mem_cgroup;
 
+#define CHANGE_HASH_SIZE 64
+#define STORE_HASH_SIZE 32
+unsigned int sample_size = 256;
+unsigned int len_sample = 4;
+unsigned int len_inter = 28;
+unsigned int ksm_zero_hash = 0;
+typedef struct head_item_node{
+	u32 hash_array[STORE_HASH_SIZE];
+}head_item;
+
 #ifdef CONFIG_KSM
 int ksm_madvise(struct vm_area_struct *vma, unsigned long start,
 		unsigned long end, int advice, unsigned long *vm_flags);
