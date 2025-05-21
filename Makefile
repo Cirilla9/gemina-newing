@@ -2,7 +2,7 @@
 VERSION = 5
 PATCHLEVEL = 10
 SUBLEVEL = 0
-EXTRAVERSION = -Gemina
+EXTRAVERSION = -Gemina-newing
 NAME = Kleptomaniac Octopus
 
 # *DOCUMENTATION*

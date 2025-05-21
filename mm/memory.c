@@ -161,6 +161,117 @@ void mm_trace_rss_stat(struct mm_struct *mm, int member, long count)
 	trace_rss_stat(mm, member, count);
 }
 
+struct kmem_cache *gemina_head_item_cachep;
+struct list_head gemina_head_list;
+spinlock_t gemina_head_list_lock;
+void __init gemina_kmem_cache_init(void)
+{
+	gemina_head_item_cachep = kmem_cache_create("gemina_head_item_cachep",
+            sizeof(struct head_item), 0,
+			SLAB_PANIC, NULL);
+	INIT_LIST_HEAD(&gemina_head_list);
+	spin_lock_init(&gemina_head_list_lock);
+}
+
+void gemina_init_head_item(struct head_item *node) {
+    int i;
+    for (i = 0; i < STORE_HASH_SIZE; ++i) {
+        node->hash_array[i] = 0;
+    }
+}
+
+struct head_item *gemina_head_item_alloc(void)
+{
+    struct head_item *node;
+	node  = kmem_cache_zalloc(gemina_head_item_cachep, GFP_ATOMIC);
+	if (!node)
+		return NULL;
+	memset(node, 0, sizeof(struct head_item));
+	gemina_init_head_item(node);
+	return node;
+}
+
+void gemina_head_item_free(struct head_item *node)
+{
+	kmem_cache_free(gemina_head_item_cachep, node);
+}
+
+/*crud*/
+struct head_item *gemina_head_item_lookup_nolock(struct mm_struct *mm,
+	unsigned long address)
+{
+    struct head_item *head_item = NULL;
+    hash_for_each_possible_rcu(mm->gemina_head_list, head_item,
+		head_list ,PAGE_ALIGN_FLOOR(address) ) {
+        if (head_item->address == PAGE_ALIGN_FLOOR(address)){
+			return head_item;
+		}
+    }
+	return NULL;
+}
+
+struct head_item *gemina_head_item_lookup(struct mm_struct *mm,
+	unsigned long address)
+{
+	spin_lock(&mm->gemina_headlist_lock);
+    struct head_item *head_item = NULL;
+    hash_for_each_possible_rcu(mm->gemina_head_list, head_item,
+		head_list ,PAGE_ALIGN_FLOOR(address) ) {
+        if (head_item->address == PAGE_ALIGN_FLOOR(address)){
+			spin_unlock(&mm->gemina_headlist_lock);
+			return head_item;
+		}
+    }
+	spin_unlock(&mm->gemina_headlist_lock);
+	return NULL;
+}
+
+void gemina_head_item_delete(struct mm_struct *mm, unsigned long address)
+{
+	struct head_item *head_item= gemina_head_item_lookup(mm, address);
+	if (head_item)
+		hash_del_rcu(&(head_item->head_list));
+}
+
+void gemina_head_item_insert(struct mm_struct *mm,
+		unsigned long address, struct head_item *node)
+{
+	spin_lock(&mm->gemina_headlist_lock);
+	node->address = PAGE_ALIGN_FLOOR(address);
+	node->mm = mm;
+	hash_add_rcu(mm->gemina_head_list, &(node->head_list), node->address);
+	spin_unlock(&mm->gemina_headlist_lock);
+}
+
+void gemina_clear_head_list_range(struct mm_struct *mm,
+		unsigned long start, unsigned long end)
+{
+	unsigned long i;
+	unsigned int pos = 0;
+	unsigned long haddr;
+
+	struct head_item *head_item = NULL;
+	spin_lock(&mm->gemina_headlist_lock);
+	for (i = start; i < end; i += PAGE_SIZE) {
+		haddr = i & HPAGE_PMD_MASK;
+		pos = i & (HPAGE_PMD_SIZE - 1);
+		pos = pos >> PAGE_SHIFT;
+
+		/*head_item = gemina_head_item_lookup_nolock(mm,
+				HPAGE_ALIGN_FLOOR(i));
+
+		if (head_item) {
+			bitmap_clear(head_item->popl_bitmap, pos, 1);
+			head_item->committed = 0;
+		}
+		*/
+	}
+	spin_unlock(&mm->gemina_headlist_lock);
+	printk("gemina_clear_headlist_range_success: start=%lu, end=%lu",
+		start, end);
+}
+
+
 #if defined(SPLIT_RSS_COUNTING)
 
 void sync_mm_rss(struct mm_struct *mm)

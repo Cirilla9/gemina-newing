@@ -15,6 +15,7 @@
 
 #include "asm/string_64.h"
 #include "linux/kernel.h"
+#include "linux/mm_types.h"
 #include <linux/errno.h>
 #include <linux/mm.h>
 #include <linux/fs.h>
@@ -51,6 +52,16 @@
 #define NUMA(x)		(0)
 #define DO_NUMA(x)	do { } while (0)
 #endif
+
+#define SHORT_WINDOW 3
+#define LONG_WINDOW 10
+unsigned long bins[4] = {0}; // 0–25%, 25–50%, 50–75%, 75–100%
+bool print_base_detail = false;
+bool print_detail = false;
+unsigned int gemina_sample_size = 256;
+unsigned int gemina_len_sample = 4;
+unsigned int gemina_len_inter = 28;
+unsigned int gemina_ksm_zero_hash = 0;
 
 #define BITSPERWORD 32
 #define SHIFT 5
@@ -229,11 +240,6 @@ struct stable_node {
  * @head: pointer to stable_node heading this list in the stable tree
  * @hlist: link into hlist of rmap_items hanging off that stable_node
  */
-#define SHORT_WINDOW 3
-#define LONG_WINDOW 10
-unsigned long bins[4] = {0}; // 0–25%, 25–50%, 50–75%, 75–100%
-bool print_base_detail = false;
-bool print_detail = false;
 
 struct rmap_item {
 	struct rmap_item *rmap_list;
@@ -2473,13 +2479,16 @@ next_mm:
 	ksm_scan.seqnr++;
 
 	//print frequency bins
-	trace_printk("==================Round=%lu==================\n",
-			ksm_scan.seqnr);
-	for (i = 0; i < 4; i++) {
-		trace_printk("bin[%d]=%lu\n", i, bins[i]);
-		bins[i] = 0;
+	if (print_base_detail){
+		trace_printk("==================Round=%lu==================\n",
+				ksm_scan.seqnr);
+		for (i = 0; i < 4; i++) {
+			trace_printk("bin[%d]=%lu\n", i, bins[i]);
+			bins[i] = 0;
+		}
+		trace_printk("============================================\n\n");
 	}
-	trace_printk("============================================\n\n");
+
 
 	return NULL;
 }
@@ -2582,14 +2591,20 @@ static void ksm_do_scan(unsigned int scan_npages)
 			get_base_ksm_pages(page);
 		}
 
+		rmap_item->head_item = gemina_head_item_lookup(rmap_item->mm,
+			HPAGE_ALIGN_FLOOR(rmap_item->address));
 		if (!rmap_item->head_item) {
-			if (PageHead(page)){
-				rmap_item->head_item = alloc_head_item();
-				
-			}
+			rmap_item->head_item = alloc_head_item();
+			rmap_item->head_item->mm = rmap_item->mm;
+			rmap_item->head_item->address = HPAGE_ALIGN_FLOOR(rmap_item->address);
+			gemina_head_item_insert(rmap_item->mm, rmap_item->head_item->address,
+				rmap_item->head_item);
 		}
+		// test tracking page with head or not
+		trace_printk("mm=%lu, Haddr=%lu, addr=%lu\n",
+			(unsigned long)rmap_item->mm, rmap_item->head_item->address, rmap_item->address);
 
-		cmp_and_merge_page(page, rmap_item);
+		// cmp_and_merge_page(page, rmap_item);
 		put_page(page);
 	}
 }

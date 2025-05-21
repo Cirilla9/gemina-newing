@@ -14,6 +14,7 @@
 #include <linux/uprobes.h>
 #include <linux/page-flags-layout.h>
 #include <linux/workqueue.h>
+#include <linux/hashtable.h>
 
 #include <asm/mmu.h>
 
@@ -558,6 +559,8 @@ struct mm_struct {
 #endif
 	} __randomize_layout;
 
+	spinlock_t gemina_headlist_lock;
+	struct hlist_head gemina_head_list[10240];
 	/*
 	 * The mm_cpumask needs to be at the end of mm_struct, because it
 	 * is dynamically sized based on nr_cpu_ids.

@@ -20,13 +20,36 @@ struct mem_cgroup;
 
 #define CHANGE_HASH_SIZE 64
 #define STORE_HASH_SIZE 32
-unsigned int sample_size = 256;
-unsigned int len_sample = 4;
-unsigned int len_inter = 28;
-unsigned int ksm_zero_hash = 0;
-typedef struct head_item_node{
+extern unsigned int gemina_sample_size;
+extern unsigned int gemina_len_sample;
+extern unsigned int gemina_len_inter;
+extern unsigned int gemina_ksm_zero_hash;
+
+struct head_item{
+	struct hlist_node head_list;
+	struct mm_struct *mm;
+	unsigned long address;
 	u32 hash_array[STORE_HASH_SIZE];
-}head_item;
+};
+
+struct head_item *gemina_head_item_lookup(struct mm_struct *mm,
+		unsigned long address);
+
+void gemina_head_item_insert(struct mm_struct *mm,
+		unsigned long address,
+		struct head_item *node);
+
+void gemina_head_item_delete(struct mm_struct *mm,
+		unsigned long address);
+
+void init_gemina_head_item(struct head_item *node);
+
+struct head_item *gemina_head_item_alloc(void);
+
+void gemina_head_item_free(struct head_item *node);
+
+void gemina_clear_head_item_range(struct mm_struct *mm,
+		unsigned long start, unsigned long end);
 
 #ifdef CONFIG_KSM
 int ksm_madvise(struct vm_area_struct *vma, unsigned long start,

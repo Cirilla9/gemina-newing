@@ -223,6 +223,24 @@ int overcommit_policy_handler(struct ctl_table *, int, void *, size_t *,
 
 /* test whether an address (unsigned long or pointer) is aligned to PAGE_SIZE */
 #define PAGE_ALIGNED(addr)	IS_ALIGNED((unsigned long)(addr), PAGE_SIZE)
+#define HPAGE_ALIGNED(addr)	IS_ALIGNED((unsigned long)addr, HPAGE_SIZE)
+
+static inline unsigned long PAGE_ALIGN_FLOOR(unsigned long addr) 
+{
+	if (PAGE_ALIGNED(addr))
+		return addr;
+	else
+		return PAGE_ALIGN(addr) - PAGE_SIZE;
+}
+
+#define HPAGE_ALIGN(addr) ALIGN(addr, HPAGE_SIZE)
+static inline unsigned long HPAGE_ALIGN_FLOOR(unsigned long addr) 
+{
+	if (HPAGE_ALIGNED(addr))
+		return addr;
+	else
+		return HPAGE_ALIGN(addr) - HPAGE_SIZE;
+}
 
 #define lru_to_page(head) (list_entry((head)->prev, struct page, lru))
 
@@ -2128,6 +2146,8 @@ static inline pmd_t *pmd_alloc(struct mm_struct *mm, pud_t *pud, unsigned long a
 }
 #endif /* CONFIG_MMU */
 
+void __init gemina_kmem_cache_init(void);
+
 #if USE_SPLIT_PTE_PTLOCKS
 #if ALLOC_SPLIT_PTLOCKS
 void __init ptlock_cache_init(void);
@@ -2196,6 +2216,7 @@ static inline void pgtable_init(void)
 {
 	ptlock_cache_init();
 	pgtable_cache_init();
+	gemina_kmem_cache_init();
 }
 
 static inline bool pgtable_pte_page_ctor(struct page *page)
