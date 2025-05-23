@@ -296,7 +296,6 @@ static struct ksm_scan ksm_scan = {
 static struct kmem_cache *rmap_item_cache;
 static struct kmem_cache *stable_node_cache;
 static struct kmem_cache *mm_slot_cache;
-static struct kmem_cache *head_item_cache;
 
 /* The number of nodes in the stable tree */
 static unsigned long ksm_pages_shared;
@@ -365,10 +364,6 @@ static int __init ksm_slab_init(void)
 	if (!rmap_item_cache)
 		goto out;
 
-	head_item_cache = KSM_KMEM_CACHE(head_item, 0);
-	if (!head_item_cache)
-		goto out_free0;
-
 	stable_node_cache = KSM_KMEM_CACHE(stable_node, 0);
 	if (!stable_node_cache)
 		goto out_free1;
@@ -383,33 +378,16 @@ out_free2:
 	kmem_cache_destroy(stable_node_cache);
 out_free1:
 	kmem_cache_destroy(rmap_item_cache);
-out_free0:
-	kmem_cache_destroy(head_item_cache);
 out:
 	return -ENOMEM;
 }
 
 static void __init ksm_slab_free(void)
 {
-	kmem_cache_destroy(head_item_cache);
 	kmem_cache_destroy(mm_slot_cache);
 	kmem_cache_destroy(stable_node_cache);
 	kmem_cache_destroy(rmap_item_cache);
 	mm_slot_cache = NULL;
-}
-
-static inline struct head_item *alloc_head_item(void)
-{
-    struct head_item *head_item;
-
-    head_item = kmem_cache_zalloc(head_item_cache, GFP_KERNEL);
-
-    return head_item;
-}
-
-static inline void free_head_item(struct head_item *head_item)
-{
-    kmem_cache_free(head_item_cache, head_item);
 }
 
 static __always_inline bool is_stable_node_chain(struct stable_node *chain)
@@ -903,7 +881,7 @@ static void remove_trailing_rmap_items(struct mm_slot *mm_slot,
 		remove_rmap_item_from_tree(rmap_item);
 		free_rmap_item(rmap_item);
 		if (rmap_item->head_item){
-            free_head_item(rmap_item->head_item);
+            gemina_head_item_free(rmap_item->head_item);
             rmap_item->head_item = NULL;
         }
 	}
@@ -2292,7 +2270,7 @@ static struct rmap_item *get_next_rmap_item(struct mm_slot *mm_slot,
 		remove_rmap_item_from_tree(rmap_item);
 		free_rmap_item(rmap_item);
 		if (rmap_item->head_item){
-            free_head_item(rmap_item->head_item);
+            gemina_head_item_free(rmap_item->head_item);
             rmap_item->head_item = NULL;
         }
 	}
@@ -2594,7 +2572,7 @@ static void ksm_do_scan(unsigned int scan_npages)
 		rmap_item->head_item = gemina_head_item_lookup(rmap_item->mm,
 			HPAGE_ALIGN_FLOOR(rmap_item->address));
 		if (!rmap_item->head_item) {
-			rmap_item->head_item = alloc_head_item();
+			rmap_item->head_item = gemina_head_item_alloc();
 			rmap_item->head_item->mm = rmap_item->mm;
 			rmap_item->head_item->address = HPAGE_ALIGN_FLOOR(rmap_item->address);
 			gemina_head_item_insert(rmap_item->mm, rmap_item->head_item->address,

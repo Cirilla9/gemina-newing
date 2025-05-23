@@ -46,7 +46,7 @@ void init_gemina_head_item(struct head_item *node);
 
 struct head_item *gemina_head_item_alloc(void);
 
-void gemina_head_item_free(struct head_item *node);
+void gemina_head_item_free(struct head_item *head_item);
 
 void gemina_clear_head_item_range(struct mm_struct *mm,
 		unsigned long start, unsigned long end);

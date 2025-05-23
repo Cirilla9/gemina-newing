@@ -191,9 +191,9 @@ struct head_item *gemina_head_item_alloc(void)
 	return node;
 }
 
-void gemina_head_item_free(struct head_item *node)
+void gemina_head_item_free(struct head_item *head_item)
 {
-	kmem_cache_free(gemina_head_item_cachep, node);
+	kmem_cache_free(gemina_head_item_cachep, head_item);
 }
 
 /*crud*/
