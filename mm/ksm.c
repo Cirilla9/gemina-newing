@@ -13,8 +13,11 @@
  *	Hugh Dickins
  */
 
+#include "asm/page_types.h"
 #include "asm/string_64.h"
+#include "linux/compiler_types.h"
 #include "linux/kernel.h"
+#include "linux/page-flags.h"
 #include <linux/errno.h>
 #include <linux/mm.h>
 #include <linux/fs.h>
@@ -229,13 +232,38 @@ struct stable_node {
  * @head: pointer to stable_node heading this list in the stable tree
  * @hlist: link into hlist of rmap_items hanging off that stable_node
  */
-#define SHORT_WINDOW 3
+#define SHORT_WINDOW 2
 #define LONG_WINDOW 10
+#define SAMPLE_PAGES 64
+#define LEN_S 4
+#define INTER 28
+
 unsigned long bins[4] = {0}; // 0–25%, 25–50%, 50–75%, 75–100%
 bool print_base_detail = false;
 bool print_detail = false;
 
+struct head_item{
+	//before do_scan
+	unsigned int checksums[SAMPLE_PAGES/2];
+	bool short_hist[SHORT_WINDOW];
+    bool long_hist[LONG_WINDOW];
+	unsigned int age;
+	unsigned short scan_age;
+    unsigned short accessed;
+	unsigned short sample_frequency;
+	unsigned short sample_dups;
+	unsigned short sample_writes;
+	unsigned short sample_zeros;
+	//in do_scan set a global
+	unsigned short actual_ksms;
+	unsigned short actual_access;
+	unsigned short actual_zeros;
+	unsigned short actual_writes;
+};
+struct head_item *global_head_item = NULL;
+
 struct rmap_item {
+	//can goto cmp
 	struct rmap_item *rmap_list;
 	bool short_hist[SHORT_WINDOW];
     bool long_hist[LONG_WINDOW];
@@ -2506,25 +2534,25 @@ static void get_base_frequency(struct rmap_item* rmap_item,struct page* page){
 	for (i = 0; i < len_long; i++) {
 		fl += rmap_item->long_hist[i];
 	}
-	rmap_item->frequency = ((fs * 1000 / len_short)
-					+ (fl * 1000 / len_long))/2;
+	rmap_item->frequency = ((fs * 100 / len_short)
+					+ (fl * 100 / len_long))/2;
 
 	//store in buttle
-	if (rmap_item->frequency >= 750)
+	if (rmap_item->frequency >= 75)
 		bins[3]++;
-	else if (rmap_item->frequency >= 500)
+	else if (rmap_item->frequency >= 50)
 		bins[2]++;
-	else if (rmap_item->frequency >= 250)
+	else if (rmap_item->frequency >= 25)
 		bins[1]++;
 	else if (rmap_item->frequency != 0)
 		bins[0]++;
 
 	//print detail
 	if (print_base_detail && rmap_item->frequency != 0) {
-		trace_printk("page=%lu, fac_short[%d,%d,%d]=%d, "
+		trace_printk("page=%lu, fac_short[%d,%d]=%d, "
 			"fac_long[%d,%d,%d,%d,%d,%d,%d,%d,%d,%d]=%d, fac=%d, allac=%d\n",
 			rmap_item->address,
-			rmap_item->short_hist[0], rmap_item->short_hist[1], rmap_item->short_hist[2],
+			rmap_item->short_hist[0], rmap_item->short_hist[1],
 			fs,
 			rmap_item->long_hist[0], rmap_item->long_hist[1], rmap_item->long_hist[2],
 			rmap_item->long_hist[3], rmap_item->long_hist[4], rmap_item->long_hist[5],
@@ -2536,28 +2564,28 @@ static void get_base_frequency(struct rmap_item* rmap_item,struct page* page){
 	}
 }
 
-static int get_base_ksm_pages(struct page *head)
-{
-    int i = 0, j = 0, start = page_to_pfn(head);
-    struct page *page = NULL;
-    int ksm = 0;
-	// unsigned long vm_flags;
-    // struct mem_cgroup *memcg;
-    for (i = 0; i < 32; i++){
-        for (j = 0; j < 16; j++){
-            page = pfn_to_page(start + i + 32 * j);
-            // memcg= page->mem_cgroup;
-            // if (page_referenced(page, 0, memcg, &vm_flags))
-            //     hot++;
-            if (PageKsm(page))
-                ksm++;
-        }
-        // if ((hot - ksm) < 3 * (i + 1))
-        //     break;
-    }
-    // printk("<0>""hot:%d ksm:%d\n",hot,ksm);
-    return ksm;
-}
+// static int get_base_ksm_pages(struct page *head)
+// {
+//     int i = 0, j = 0, start = page_to_pfn(head);
+//     struct page *page = NULL;
+//     int ksm = 0;
+// 	// unsigned long vm_flags;
+//     // struct mem_cgroup *memcg;
+//     for (i = 0; i < 32; i++){
+//         for (j = 0; j < 16; j++){
+//             page = pfn_to_page(start + i + 32 * j);
+//             // memcg= page->mem_cgroup;
+//             // if (page_referenced(page, 0, memcg, &vm_flags))
+//             //     hot++;
+//             if (PageKsm(page))
+//                 ksm++;
+//         }
+//         // if ((hot - ksm) < 3 * (i + 1))
+//         //     break;
+//     }
+//     // printk("<0>""hot:%d ksm:%d\n",hot,ksm);
+//     return ksm;
+// }
 
 /**
  * ksm_do_scan  - the ksm scanner main worker function.
@@ -2566,7 +2594,8 @@ static int get_base_ksm_pages(struct page *head)
 static void ksm_do_scan(unsigned int scan_npages)
 {
 	struct rmap_item *rmap_item;
-	struct page *page;
+	struct page *page, *subpage;
+	unsigned int start, i, j = 0;
 
 	while (scan_npages-- && likely(!freezing(current))) {
 		cond_resched();
@@ -2577,16 +2606,17 @@ static void ksm_do_scan(unsigned int scan_npages)
 		/* here get base page frequency */
 		get_base_frequency(rmap_item, page);
 
-		/* here get base ksm pages*/
+		//get head_item
 		if (PageHead(page)) {
-			get_base_ksm_pages(page);
+			if (!rmap_item->head_item) {
+				rmap_item->head_item = alloc_head_item();
+			}
+			global_head_item = rmap_item->head_item;
 		}
 
-		if (!rmap_item->head_item) {
-			if (PageHead(page)){
-				rmap_item->head_item = alloc_head_item();
-				
-			}
+		if (PageTransCompound(page) && PageHead(page) && rmap_item->head_item) {
+			start = start + rmap_item->head_item->scan_age*2;
+			
 		}
 
 		cmp_and_merge_page(page, rmap_item);
